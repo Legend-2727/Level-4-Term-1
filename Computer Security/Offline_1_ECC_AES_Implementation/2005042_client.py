@@ -2,6 +2,7 @@ import socket
 import pickle
 import time
 import random
+import sys
 from sympy import nextprime, sqrt_mod
 from _2005042_aes import aes_cbc_encrypt
 from _2005042_elliptic_curve_DH import (
@@ -13,6 +14,8 @@ from _2005042_elliptic_curve_DH import (
 
 HOST = 'localhost'
 PORT = 5000
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
 
 def generate_prime(bits=128):
     while True:
@@ -21,37 +24,76 @@ def generate_prime(bits=128):
         if prime.bit_length() == bits:
             return prime
 
-def start_client():
-    print(f"\nAttempting to connect to server at {HOST}:{PORT}")
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+def generate_curve_parameters(max_attempts=3):
+    """Generate valid curve parameters with retry logic"""
+    for attempt in range(max_attempts):
         try:
+            p = generate_prime(128)
+            a = random.randint(1, p-1)
+            b = random.randint(1, p-1)
+            if (4 * pow(a, 3, p) + 27 * pow(b, 2, p)) % p == 0:
+                continue
+            G = find_point_on_curve(p, a, b)
+            if G is not None:
+                return p, a, b, G
+        except ValueError:
+            if attempt < max_attempts - 1:
+                print(f"Failed to generate curve parameters, attempt {attempt + 1}/{max_attempts}")
+                time.sleep(1)
+                continue
+            raise
+    raise ValueError("Failed to generate valid curve parameters after multiple attempts")
+
+def connect_to_server():
+    """Attempt to connect to server with retry logic"""
+    for attempt in range(MAX_RETRIES):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(10)  # Set a timeout for connection attempts
             s.connect((HOST, PORT))
             print("Successfully connected to server!")
+            return s
         except ConnectionRefusedError:
-            print("Error: Could not connect to server. Make sure the server is running.")
-            return
+            if attempt < MAX_RETRIES - 1:
+                print(f"Connection refused, retrying in {RETRY_DELAY} seconds... (Attempt {attempt + 1}/{MAX_RETRIES})")
+                time.sleep(RETRY_DELAY)
+            else:
+                print("Error: Could not connect to server after multiple attempts. Make sure the server is running.")
+                sys.exit(1)
         except Exception as e:
             print(f"Error connecting to server: {e}")
-            return
+            if attempt < MAX_RETRIES - 1:
+                print(f"Retrying in {RETRY_DELAY} seconds... (Attempt {attempt + 1}/{MAX_RETRIES})")
+                time.sleep(RETRY_DELAY)
+            else:
+                sys.exit(1)
 
-        # 1. Generate curve and parameters silently
-        p = generate_prime(128)
-        a = random.randint(1, p-1)
-        b = random.randint(1, p-1)
-        if (4 * pow(a, 3, p) + 27 * pow(b, 2, p)) % p == 0:
-            return start_client()
-
-        G = find_point_on_curve(p, a, b)
+def start_client():
+    print(f"\nAttempting to connect to server at {HOST}:{PORT}")
+    
+    # Connect to server with retry logic
+    s = connect_to_server()
+    
+    try:
+        # Generate curve parameters with retry logic
+        print("Generating curve parameters...")
+        p, a, b, G = generate_curve_parameters()
+        
+        # Generate private key and compute public key
         Ka = random.randint(1, p-1)
         A = scalar_mult(Ka, G, a, p)
 
-        # Send parameters silently
+        # Send parameters
         print("Sending parameters to server...")
         data = pickle.dumps((a, b, p, G, A))
         s.sendall(data)
         print("Parameters sent successfully")
+        
+        # Send private key
         s.sendall(Ka.to_bytes(32, 'big'))
         print("Sent private key to server")
+        
+        # Receive server's public key
         B = pickle.loads(s.recv(8192))
         print("Received public key from server")
 
@@ -61,7 +103,7 @@ def start_client():
         if shared_point is None:
             raise ValueError("Failed to compute shared point")
         aes_key = shared_point[0].to_bytes(16, 'big')[:16]
-        key_time = (time.time() - key_start_time) * 1000  # Convert to milliseconds
+        key_time = (time.time() - key_start_time) * 1000
 
         while True:
             try:
@@ -101,8 +143,14 @@ def start_client():
                 print(f"Encryption Time: {enc_time:.3f} ms")
 
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"Error during message handling: {e}")
                 break
+
+    except Exception as e:
+        print(f"Error during key exchange: {e}")
+    finally:
+        s.close()
+        print("\nConnection closed.")
 
 if __name__ == "__main__":
     start_client()
