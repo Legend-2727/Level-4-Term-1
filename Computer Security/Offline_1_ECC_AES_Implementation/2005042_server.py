@@ -1,11 +1,19 @@
 import socket
 import pickle
 import time
+import msvcrt
 from _2005042_aes import aes_cbc_decrypt
 from _2005042_elliptic_curve_DH import scalar_mult, point_add
 
 HOST = 'localhost'
 PORT = 5000
+
+def is_q_pressed():
+    """Check if 'q' key is pressed"""
+    if msvcrt.kbhit():
+        key = msvcrt.getch()
+        return key == b'q' or key == b'Q'
+    return False
 
 def handle_client(conn, addr):
     print(f"\nConnected to client at {addr}")
@@ -29,6 +37,11 @@ def handle_client(conn, addr):
         key_time = (time.time() - key_start_time) * 1000
 
         while True:
+            # Check for 'q' key press
+            if is_q_pressed():
+                print("\n'q' pressed. Shutting down server...")
+                return
+                
             # Receive encrypted message
             iv = conn.recv(16)
             if not iv:
@@ -64,12 +77,19 @@ def handle_client(conn, addr):
 
 def start_server():
     print(f"\nStarting server on {HOST}:{PORT}")
+    print("Press 'q' to quit the server")
+    
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind((HOST, PORT))
         s.listen()
         print("\nServer is now listening for connections...")
         
         while True:
+            # Check for 'q' key press
+            if is_q_pressed():
+                print("\n'q' pressed. Shutting down server...")
+                break
+                
             print("\nWaiting for client to connect...")
             conn, addr = s.accept()
             handle_client(conn, addr)
