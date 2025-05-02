@@ -170,11 +170,12 @@ def start_client():
         shared_point = scalar_mult(Ka, B, a, p)
         if shared_point is None:
             raise ValueError("Failed to compute shared point")
-        aes_key = shared_point[0].to_bytes(16, 'big')[:16]
+        # Use 24 bytes for AES-192
+        aes_key = shared_point[0].to_bytes(24, 'big')[:24]
         key_time = (time.time() - key_start_time) * 1000
-        print(f"[Server] Shared Key (bytes): {aes_key}")
-        print(f"[Server] Shared Key (string): {aes_key.decode('ascii', errors='replace')}")
         print(f"[Client] Shared key derived in {key_time:.3f} ms")
+        print(f"[Client] Shared key (bytes): {aes_key}")
+        print(f"[Client] Shared key (string): {aes_key.decode('ascii', errors='replace')}")
         
         # Show user menu: send message or file
         while True:

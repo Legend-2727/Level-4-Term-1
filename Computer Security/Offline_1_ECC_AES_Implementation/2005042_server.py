@@ -50,7 +50,8 @@ def handle_client(conn, addr):
         shared_point = scalar_mult(Kb, A, a, p)
         if shared_point is None:
             raise ValueError("Failed to compute shared point")
-        aes_key = shared_point[0].to_bytes(16, 'big')[:16]
+        # Use 24 bytes for AES-192
+        aes_key = shared_point[0].to_bytes(24, 'big')[:24]
         key_time = (time.time() - key_start_time) * 1000
         print(f"[Server] Shared Key Computation Time: {key_time:.3f} ms")
         print(f"[Server] Shared Key (bytes): {aes_key}")

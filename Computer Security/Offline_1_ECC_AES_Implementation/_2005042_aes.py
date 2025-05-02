@@ -20,18 +20,20 @@ def bytes2matrix(block: bytes) -> list:
     """
     Convert a 16-byte block into a 4x4 matrix in column-major format.
     """
-    matrix = []  # This will be a list of 4 columns
+    if len(block) != 16:
+        raise ValueError("AES block size must be exactly 16 bytes")
 
-    # Go through 0, 4, 8, 12 → 4 columns
-    for i in range(0, 16, 4):
-        column = []  # each column will be a list of 4 values
-        column.append(block[i])
-        column.append(block[i + 1])
-        column.append(block[i + 2])
-        column.append(block[i + 3])
-        matrix.append(column)
+    return [[block[r + 4 * c] for r in range(4)] for c in range(4)]
 
-    return matrix
+def key2matrix(key: bytes) -> list:
+    """
+    Convert a key (16/24/32 bytes) into a list of 4-byte columns.
+    """
+    key_len = len(key)
+    if key_len not in (16, 24, 32):
+        raise ValueError("Key must be 16, 24, or 32 bytes")
+    
+    return [[key[r + 4 * c] for r in range(4)] for c in range(key_len // 4)]
 
 def matrix2bytes(matrix: list) -> bytes:
     """
@@ -105,25 +107,26 @@ def add_round_key(state: list, key: list) -> None:
             
 def encrypt_block(plaintext: bytes, round_keys: list) -> bytes:
     """
-    Encrypt a single 16-byte block using AES-128 and 11 round keys.
+    Encrypt a single block using AES.
+    Supports 128/192/256-bit keys based on round_keys length.
     """
     state = bytes2matrix(plaintext)
+    Nr = len(round_keys) - 1  # Number of rounds based on key size
 
-    # Initial round (round 0)
+    # Initial round
     add_round_key(state, round_keys[0])
 
-    # Rounds 1 to 9
-    for round in range(1, 10):
+    # Main rounds
+    for rnd in range(1, Nr):
         sub_bytes(state)
         shift_rows(state)
         mix_columns(state)
-        add_round_key(state, round_keys[round])
+        add_round_key(state, round_keys[rnd])
 
-    # Final round (round 10)
+    # Final round (no MixColumns)
     sub_bytes(state)
     shift_rows(state)
-    add_round_key(state, round_keys[10])
-
+    add_round_key(state, round_keys[-1])
     return matrix2bytes(state)
 
 RCON = [0x01, 0x02, 0x04, 0x08, 0x10,
@@ -131,34 +134,47 @@ RCON = [0x01, 0x02, 0x04, 0x08, 0x10,
 
 def key_expansion(key: bytes) -> list:
     """
-    Expand 16-byte AES key into 11 round keys (each a 4×4 matrix).
+    Expand an AES key (16/24/32 bytes) into the full round-key schedule.
+    Returns a list of (4×4) column-major matrices, one per round.
     """
-    # Step 1: Initial 4 words from the key
-    key_columns = bytes2matrix(key)  # 4 columns of 4 bytes each
-    logger.debug(f"Initial key columns: {key_columns}")
+    key_len = len(key)
+    if key_len not in (16, 24, 32):
+        raise ValueError("Key must be 16, 24, or 32 bytes")
 
-    # Step 2: Expand to 44 words (4 words per round × 11 rounds)
-    i = 0
-    while len(key_columns) < 44:
-        word = key_columns[-1][:]  # copy last word
-        logger.debug(f"word: {word}")
-        if len(key_columns) % 4 == 0:
-            # Rotate left
+    # Nb is always 4; look-up Nk and Nr for the key size
+    NB = 4
+    NK_NR = {16: (4, 10), 24: (6, 12), 32: (8, 14)}  # (Nk, Nr) pairs
+    Nk, Nr = NK_NR[key_len]
+
+    # Convert key to matrix format
+    key_columns = key2matrix(key)  # Use key2matrix instead of bytes2matrix
+    i = 0  # Rcon counter
+
+    # Generate round keys
+    total_words = NB * (Nr + 1)
+    while len(key_columns) < total_words:
+        word = key_columns[-1].copy()
+
+        # For every Nk words
+        if len(key_columns) % Nk == 0:
+            # RotWord
             word = word[1:] + word[:1]
-            # SubBytes
+            # SubWord
             word = [Sbox[b] for b in word]
-            # XOR with RCON
+            # XOR with Rcon
             word[0] ^= RCON[i]
             i += 1
+        # Special case for 256-bit keys
+        elif Nk == 8 and len(key_columns) % Nk == 4:
+            word = [Sbox[b] for b in word]
 
-        # XOR with word 4 positions back
-        prev_word = key_columns[-4]
-        word = [b1 ^ b2 for b1, b2 in zip(word, prev_word)]
-
+        # XOR with the word Nk positions earlier
+        prev_word = key_columns[-Nk]
+        word = [b ^ p for b, p in zip(word, prev_word)]
         key_columns.append(word)
 
-    # Step 3: Group 4 words = 1 round key matrix
-    round_keys = [key_columns[i:i+4] for i in range(0, 44, 4)]
+    # Group into round keys
+    round_keys = [key_columns[j:j+NB] for j in range(0, total_words, NB)]
     return round_keys
 
 def pkcs7_pad(data: bytes, block_size=16) -> bytes:
@@ -231,25 +247,26 @@ def pkcs7_unpad(padded: bytes) -> bytes:
 
 def decrypt_block(cipher_block: bytes, round_keys: list) -> bytes:
     """
-    Decrypt a single 16-byte AES block using the 11 round keys.
+    Decrypt a single block using AES.
+    Supports 128/192/256-bit keys based on round_keys length.
     """
     state = bytes2matrix(cipher_block)
+    Nr = len(round_keys) - 1  # Number of rounds based on key size
 
-    # Initial round: add final round key
-    add_round_key(state, round_keys[10])
+    # Initial round
+    add_round_key(state, round_keys[-1])
     inv_shift_rows(state)
     inv_sub_bytes(state)
 
-    # Rounds 9 to 1
-    for round in range(9, 0, -1):
-        add_round_key(state, round_keys[round])
+    # Main rounds
+    for rnd in range(Nr-1, 0, -1):
+        add_round_key(state, round_keys[rnd])
         inv_mix_columns(state)
         inv_shift_rows(state)
         inv_sub_bytes(state)
 
-    # Final round: add initial round key
+    # Final round
     add_round_key(state, round_keys[0])
-
     return matrix2bytes(state)
 
 def aes_cbc_decrypt(ciphertext: bytes, key: bytes) -> bytes:
@@ -275,11 +292,26 @@ def aes_cbc_decrypt(ciphertext: bytes, key: bytes) -> bytes:
 
 
 # if __name__ == "__main__":
-#     key = b'Thats my Kung Fu'
-#     message = b"Hello AES CBC mode test!!"
+#     # Test all key sizes
+#     test_block = b"Attack at dawn!!"  # 16 bytes
 
-#     ciphertext = aes_cbc_encrypt(message, key)
-#     print("Encrypted (hex):", ciphertext.hex())
+#     # Test AES-128
+#     key_128 = b"A"*16
+#     rk = key_expansion(key_128)
+#     encrypted = encrypt_block(test_block, rk)
+#     decrypted = decrypt_block(encrypted, rk)
+#     print(f"AES-128: {'Passed' if decrypted == test_block else 'Failed'}")
 
-#     decrypted = aes_cbc_decrypt(ciphertext, key)
-#     print("Decrypted text:", decrypted)
+#     # Test AES-192
+#     key_192 = b"B"*24
+#     rk = key_expansion(key_192)
+#     encrypted = encrypt_block(test_block, rk)
+#     decrypted = decrypt_block(encrypted, rk)
+#     print(f"AES-192: {'Passed' if decrypted == test_block else 'Failed'}")
+
+#     # Test AES-256
+#     key_256 = b"C"*32
+#     rk = key_expansion(key_256)
+#     encrypted = encrypt_block(test_block, rk)
+#     decrypted = decrypt_block(encrypted, rk)
+#     print(f"AES-256: {'Passed' if decrypted == test_block else 'Failed'}")
