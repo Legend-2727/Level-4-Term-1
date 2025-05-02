@@ -13,7 +13,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Disable all logging
-logger.setLevel(logging.ERROR)
+# logger.setLevel(logging.ERROR)
 
 AES_MOD = BitVector(bitstring='100011011')
 def bytes2matrix(block: bytes) -> list:

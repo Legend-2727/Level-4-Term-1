@@ -2,12 +2,27 @@ import socket
 import pickle
 import time
 import msvcrt
+import os
+import random
+import logging
 from _2005042_aes import aes_cbc_decrypt
 from _2005042_elliptic_curve_DH import scalar_mult, point_add
 
 HOST = 'localhost'
 PORT = 5000
 
+# Configure logging  ── add force=True so it overrides any prior setup
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('client_debug.log'),
+        logging.StreamHandler()
+    ],
+    force=True               # <- make basicConfig override earlier handlers
+)
+# To turn off debug logging, uncomment the following line:
+# logging.getLogger().setLevel(logging.INFO)
 def is_q_pressed():
     """Check if 'q' key is pressed"""
     if msvcrt.kbhit():
@@ -23,9 +38,11 @@ def handle_client(conn, addr):
         data = conn.recv(8192)
         a, b, p, G, A = pickle.loads(data)
         print("Received parameters from client")
-        Kb = int.from_bytes(conn.recv(32), 'big')
-        B = scalar_mult(Kb, G, a, p)
-        conn.sendall(pickle.dumps(B))
+        print(f"Parameters received: (a, b, p, G, A) = ({a}, {b}, {p}, {G}, {A})")
+        # print("Received parameters from client")
+        Kb = random.randint(1, p - 1)               # Bob keeps this secret
+        B  = scalar_mult(Kb, G, a, p)               # Bob’s public key
+        conn.sendall(pickle.dumps(B))               # send *only* B
         print("Sent public key to client")
 
         # Compute shared key and measure time
@@ -35,39 +52,64 @@ def handle_client(conn, addr):
             raise ValueError("Failed to compute shared point")
         aes_key = shared_point[0].to_bytes(16, 'big')[:16]
         key_time = (time.time() - key_start_time) * 1000
-
+        print(f"[Server] Shared Key Computation Time: {key_time:.3f} ms")
+        print(f"[Server] Shared Key (bytes): {aes_key}")
+        print(f"[Server] Shared Key (string): {aes_key.decode('ascii', errors='replace')}")
         while True:
-            # Check for 'q' key press
             if is_q_pressed():
                 print("\n'q' pressed. Shutting down server...")
                 return
-                
-            # Receive encrypted message
-            iv = conn.recv(16)
-            if not iv:
+
+            # Receive menu choice
+            choice_bytes = conn.recv(4)\
+            
+            if not choice_bytes:
                 break
-            ciphertext = conn.recv(8192)
+            choice = int.from_bytes(choice_bytes, 'big')
+            logging.debug(f"Choice received from client: {choice}")
+            if choice == 0:
+                # MESSAGE: receive and decrypt
+                msg_len = int.from_bytes(conn.recv(4), 'big')
+                encrypted_message = b''
+                while len(encrypted_message) < msg_len:
+                    encrypted_message += conn.recv(min(4096, msg_len - len(encrypted_message)))
 
-            # Decrypt and measure time
-            dec_start_time = time.time()
-            plaintext = aes_cbc_decrypt(iv + ciphertext, aes_key)
-            dec_time = (time.time() - dec_start_time) * 1000
+                dec_start_time = time.time()
+                plaintext = aes_cbc_decrypt(encrypted_message, aes_key)
+                dec_time = (time.time() - dec_start_time) * 1000
 
-            print("\nDeciphered Text:")
-            print("Before Unpadding:")
-            padded_hex = ' '.join([f'{b:02x}' for b in plaintext])
-            print(f"In HEX: {padded_hex}")
-            print(f"In ASCII: {plaintext.decode()}")
+                print("\n[Server] Decrypted Message:")
+                print(plaintext.decode())
+                print(f"[Server] Decryption Time: {dec_time:.3f} ms")
 
-            # Remove padding
-            unpadded = plaintext.rstrip(b'\x02')
-            print("After Unpadding:")
-            print(f"In ASCII: {unpadded.decode()}")
-            print(f"In HEX: {' '.join([f'{b:02x}' for b in unpadded])}")
+            else:
+                # FILE: receive file name + encrypted data
+                filename_len = int.from_bytes(conn.recv(4), 'big')
+                filename = conn.recv(filename_len).decode()
 
-            print("\nExecution Time Details:")
-            print(f"Key Schedule Time: {key_time:.3f} ms")
-            print(f"Decryption Time: {dec_time:.3f} ms")
+                file_len = int.from_bytes(conn.recv(8), 'big')
+                encrypted_file = b''
+                remaining      = file_len
+                while remaining:
+                    packet = conn.recv(min(4096, remaining))
+                    if not packet:
+                        raise ConnectionError("Connection lost while receiving file")
+                    encrypted_file += packet
+                    remaining     -= len(packet)
+
+
+                dec_start_time = time.time()
+                decrypted_data = aes_cbc_decrypt(encrypted_file, aes_key)
+                dec_time = (time.time() - dec_start_time) * 1000
+
+                save_path = os.path.join('2005042_server_folder', filename)
+                with open(save_path, 'wb') as f:
+                    f.write(decrypted_data)
+
+                print(f"\n[Server] File received: {filename}")
+                print(f"[Server] Saved to: {save_path}")
+                print(f"[Server] Decryption Time: {dec_time:.3f} ms")
+
 
     except Exception as e:
         print(f"Error with client {addr}: {e}")
